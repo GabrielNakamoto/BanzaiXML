@@ -2,7 +2,17 @@
 
 #include <iostream>
 #include <vector>
-#include <fstream>
+#include <map>
+
+/** TODO:
+ *
+ * https://www.w3schools.com/xml/xml_syntax.asp
+ * - escape characters: &
+ * - XML comments
+ * - namespaces
+ * - input buffering
+ *
+ */
 
 enum TOKEN_TYPE {
     BEGIN_TAG,          // '<...'
@@ -18,136 +28,184 @@ enum TOKEN_TYPE {
     END_PARSING
 };
 
+/* std::map<std::string, char> ENTITY_REF = { */
+/*     { "&lt", '<' }, */
+/*     { "&gt", '>' }, */
+/*     { "&amp", '&' } */
+/*     /1* { "&apos", char(39)} *1/ */
+/* }; */
+
 struct Token {
     TOKEN_TYPE type;
     std::string lexeme;
 
+    Token() {};
     Token(TOKEN_TYPE t) : type(t), lexeme() {};
     Token(TOKEN_TYPE t, std::string l) : type(t), lexeme(l) {};
 };
 
-enum LEXER_STATE {
-    DEFAULT,
-    IN_TAG
+
+class Lexer;
+
+class LexerState {
+public:
+    virtual ~LexerState() {};
+    virtual Token getToken(Lexer *l) = 0;
 };
 
-LEXER_STATE current_state = DEFAULT;
+
+class DefaultState : public LexerState {
+public:
+    ~DefaultState() {};
+    Token getToken(Lexer *l);
+    static LexerState& getInstance();
+private:
+    DefaultState() {};
+};
+
+class TagState : public LexerState {
+public:
+    ~TagState() {};
+    Token getToken(Lexer *l);
+    static LexerState& getInstance();
+private:
+    TagState() {};
+};
 
 
-int skip_whitespace(char **ptr){
-    while(**ptr == ' ' || **ptr == '\n' || **ptr == '\t' || **ptr == '\r'){
-        if(**ptr == '\0') return -1;
-        (*ptr)++;
+
+class Lexer {
+public:
+    Lexer() : currentState(&DefaultState::getInstance()), fileHandle(nullptr), ptr(nullptr) {};
+    Token getToken();
+    void setState(LexerState& newState);
+    int skipWhitespace();
+    void openFile(std::string filename);
+    void closeFile();
+    void readBuffer(int size);
+    char *ptr;
+
+private:
+    LexerState *currentState;
+    FILE *fileHandle;
+};
+
+
+Token Lexer::getToken(){
+    return this->currentState->getToken(this);
+}
+
+void Lexer::setState(LexerState& newState){
+    this->currentState = &newState;
+}
+
+void Lexer::openFile(std::string filename){
+    this->fileHandle = fopen(filename.c_str(), "r");
+}
+
+void Lexer::closeFile(){
+    fclose(fileHandle);
+}
+
+void Lexer::readBuffer(int size){
+    // error handling, check bytes read
+    delete[] ptr;
+    ptr = new char[size+1];
+    fread(ptr, sizeof(char), size, fileHandle);
+    ptr[size]='\0';
+}
+
+int Lexer::skipWhitespace(){
+    while(*ptr == ' ' || *ptr == '\n' || *ptr == '\t' || *ptr == '\r'){
+        ptr++;
     }
+    if(*ptr == '\0') return -1;
     return 0;
 }
 
-void read_buffer(FILE *file, char *buffer, int size){
-    fread(buffer, sizeof(char), size, file);
+
+Token DefaultState::getToken(Lexer *l){
+    if(l->skipWhitespace() == -1) return Token(END_PARSING);
+    // new tag
+    if(*l->ptr == '<'){
+        l->ptr++;
+        if(*l->ptr == '/'){
+            l->ptr++;
+            l->setState(TagState::getInstance());
+            return Token(CLOSE_TAG);
+        } else {
+            l->setState(TagState::getInstance());
+            return Token(BEGIN_TAG);
+        }
+
+    } else {
+        // text content
+        std::string buffer;
+        while(*l->ptr != '\0' && *l->ptr != '<'){
+            /* if(*l->ptr == '&'){ */
+            /*     std::string entity_r; */
+            /*     while(isalpha(*l->ptr)){ */
+            /*         entity_r += *l->ptr; */
+            /*         l->ptr++; */
+            /*     } */
+            /* } */
+            buffer += *l->ptr;
+            l->ptr++;
+        }
+        return Token(CONTENT, buffer);
+    }
 }
 
-void Tokenize(std::vector<Token> &tokens, std::string filename){
-    FILE *file = fopen(filename.c_str(), "r");
+LexerState& DefaultState::getInstance(){
+    static DefaultState singleton;
+    return singleton;
+}
 
-    char *ptr = new char[1001];
-    read_buffer(file, ptr, 1000);
-    ptr[1000]='\0';
-    fclose(file);
 
-    while(*ptr != '\0'){
-        switch(current_state){
-            case DEFAULT: {
-                if(skip_whitespace(&ptr) == -1) return;
-                /* std::cout << "DEFAULT state\n"; */
-
-                switch(*ptr){
-                    case '<': {
-                        /* std::cout << "\tOpening brace\n"; */
-                        ptr++;
-                        if(*ptr == '\0') return;
-                        else if(*ptr == '/'){
-                            current_state = IN_TAG;
-                            tokens.push_back(Token(CLOSE_TAG));
-                            ptr++;
-                        }
-                        else {
-                            current_state = IN_TAG;
-                            tokens.push_back(Token(BEGIN_TAG));
-                        }
-                        break;
-                    }
-                    default: {
-                        /* std::cout << "\tLetters\n"; */
-                        std::string buffer;
-                        while(*ptr != '\0' && *ptr != '<'){
-                            buffer += *ptr;
-                            ptr++;
-                        }
-                        tokens.push_back(Token(CONTENT, buffer));
-                        break;
-                    }
-                }
-                break;
+Token TagState::getToken(Lexer *l){
+    if(l->skipWhitespace() == -1) return Token(END_PARSING);
+    switch(*l->ptr){
+        case '>': {
+            l->setState(DefaultState::getInstance());
+            l->ptr++;
+            return Token(END_TAG);
+        }
+        case '/': {
+            l->setState(DefaultState::getInstance());
+            l->ptr+=2;
+            return Token(END_AND_CLOSE_TAG);
+        }
+        case '"': {
+            std::string buffer;
+            l->ptr++;
+            while(*l->ptr != '"'){
+                buffer += *l->ptr;
+                l->ptr++;
             }
-
-            case IN_TAG: {
-                if(skip_whitespace(&ptr) == -1) return;
-                /* std::cout << "IN_TAG state, current char ->" << *ptr << '\n'; */
-                std::string buffer;
-                switch(*ptr){
-                    case '>': {
-                        /* std::cout << "\tClosing tag\n"; */
-                        tokens.push_back(Token(END_TAG));
-                        current_state = DEFAULT;
-                        ptr++;
-                        break;
-                    }
-                    case '/': {
-                        std::cout << "\tSlash\n";
-                        /* if(*ptr == '>') tokens.push_back(Token(END_AND_CLOSE_TAG)); */
-                        tokens.push_back(Token(END_AND_CLOSE_TAG));
-                        ptr+=2;
-                        current_state = DEFAULT;
-                        break;
-                    }
-                    case '"': {
-                        /* std::cout << "\tQuotations\n"; */
-                        std::string buffer;
-                        ptr++;
-                        while(*ptr != '"'){
-                            buffer += *ptr;
-                            ptr++;
-                        }
-                        ptr++;
-                        tokens.push_back(Token(ATTRIBUTE_VALUE, buffer));
-                        break;
-                    }
-                    default: {
-                        /* std::cout << "\tLetters\n"; */
-                        std::string buffer;
-                        while(*ptr != ' ' && *ptr != '=' && *ptr != '>'){
-                            buffer += *ptr;
-                            ptr++;
-                        }
-                        if(skip_whitespace(&ptr) == -1) return;
-                        switch(*ptr){
-                            case '=': {
-                                tokens.push_back(Token(ATTRIBUTE_NAME, buffer));
-                                while(*ptr != '"') ptr++;
-                                break;
-                            }
-                            default: {
-                                tokens.push_back(Token(ELEMENT, buffer));
-                                break;
-                            }
-                        }
-                        break;
-                    }
+            l->ptr++;
+            return Token(ATTRIBUTE_VALUE, buffer);
+        }
+        default: {
+            std::string buffer;
+            while(*l->ptr != ' ' && *l->ptr != '=' && *l->ptr != '>'){
+                buffer += *l->ptr;
+                l->ptr++;
+            }
+            if(l->skipWhitespace() == -1) return Token(END_PARSING);
+            switch(*l->ptr){
+                case '=': {
+                    while(*l->ptr != '"') l->ptr++;
+                    return Token(ATTRIBUTE_NAME, buffer);
                 }
-                break;
+                default: {
+                    return Token(ELEMENT, buffer);
+                }
             }
         }
     }
-    /* std::cout << "Finished function\n"; */
-    return;
+}
+
+LexerState& TagState::getInstance(){
+    static TagState singleton;
+    return singleton;
 }
